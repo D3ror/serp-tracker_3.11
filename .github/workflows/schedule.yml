@@ -1,0 +1,22 @@
+name: SERP Daily
+on:
+  schedule:
+    - cron: "10 4 * * *"   # 04:10 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger fetch
+        env:
+          API_BASE: ${{ secrets.API_BASE_URL }}
+          API_TOKEN: ${{ secrets.API_AUTH_TOKEN }}
+        run: |
+          curl -s -X POST "${API_BASE}/fetch-daily" -H "X-API-TOKEN: ${API_TOKEN}"
+      - name: Trigger compute
+        env:
+          API_BASE: ${{ secrets.API_BASE_URL }}
+          API_TOKEN: ${{ secrets.API_AUTH_TOKEN }}
+        run: |
+          curl -s -X POST "${API_BASE}/compute" -H "X-API-TOKEN: ${API_TOKEN}"
