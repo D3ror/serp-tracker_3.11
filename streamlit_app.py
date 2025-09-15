@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 from api.config import settings
+from api.models import Base
 from datetime import timedelta
 import plotly.express as px
 from statsmodels.tsa.seasonal import STL
@@ -14,6 +15,9 @@ def to_sync_url(async_url: str):
 
 SYNC_DB_URL = to_sync_url(settings.DATABASE_URL)
 engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
+
+# --- Create tables if missing ---
+Base.metadata.create_all(bind=engine)
 
 # --- Cached loaders ---
 @st.cache_data(ttl=600)
@@ -39,10 +43,9 @@ def fetch_rank_history(keyword_id: int, days=180):
 st.set_page_config(page_title="SERP Tracker", layout="wide")
 st.title("🔍 SERP Tracker Dashboard")
 
-# === Add keyword section ===
+# === Add new keyword ===
 st.subheader("➕ Add a new keyword")
 new_kw = st.text_input("Keyword")
-
 if st.button("Save keyword"):
     if new_kw.strip():
         try:
@@ -60,13 +63,30 @@ if st.button("Save keyword"):
 
 st.markdown("---")
 
-# === Keyword selection ===
+# === Display and manage existing keywords ===
+st.subheader("🗂 Current Keywords")
 keywords = load_keywords()
+
 if keywords.empty:
     st.info("No keywords yet. Add one above ⬆️")
     st.stop()
 
-sel = st.selectbox("Select keyword", options=keywords['text'].tolist())
+for _, row in keywords.iterrows():
+    col1, col2 = st.columns([3,1])
+    col1.write(row['text'])
+    if col2.button("Delete", key=f"del_{row['id']}"):
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM keyword WHERE id = :kid"),
+                {"kid": row['id']}
+            )
+        st.success(f"Deleted keyword '{row['text']}'")
+        st.cache_data.clear()
+
+st.markdown("---")
+
+# === Keyword selection for rank chart ===
+sel = st.selectbox("Select keyword to view rank history", options=keywords['text'].tolist())
 
 if sel:
     kid = int(keywords[keywords['text'] == sel]['id'].iloc[0])
@@ -78,10 +98,10 @@ if sel:
         df['rank'] = df['rank'].astype(float)
         fig = px.line(df, y='rank', title=f"Rank history — {sel}",
                       labels={'index':'date','rank':'rank'})
-        fig.update_yaxes(autorange="reversed")  # rank 1 is top, invert y-axis
+        fig.update_yaxes(autorange="reversed")  # rank 1 is top
         st.plotly_chart(fig, use_container_width=True)
 
-        # === STL decomposition + anomaly detection ===
+        # --- STL decomposition + anomalies ---
         if len(df) >= 14:
             series = df['rank']
             stl = STL(series, period=7, robust=True).fit()
@@ -105,7 +125,7 @@ if sel:
                 st.markdown(f"🚨 **Anomalies detected**: {len(anomalies)}")
                 st.write(anomalies.to_frame("zscore"))
 
-                # overlay anomalies on the main chart
+                # overlay anomalies on main chart
                 fig.add_scatter(x=anomalies.index,
                                 y=series.loc[anomalies.index],
                                 mode='markers',
