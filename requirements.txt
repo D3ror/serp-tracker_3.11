@@ -1,0 +1,37 @@
+# --- Core framework ---
+fastapi
+uvicorn[standard]
+streamlit
+
+# --- Database ---
+sqlalchemy
+asyncpg           # async driver for FastAPI (DB jobs)
+psycopg2-binary   # sync driver for Streamlit (dashboard)
+
+# --- Migrations ---
+alembic
+
+# --- Settings & Env ---
+pydantic-settings
+python-dateutil
+
+# --- Data processing ---
+pandas
+polars
+
+# --- Stats & ML ---
+statsmodels
+prophet
+scikit-learn
+
+# --- Visualization ---
+plotly
+
+# --- Scheduling ---
+apscheduler
+
+# --- Notifications ---
+slack_sdk
+
+# --- HTTP requests ---
+httpx
