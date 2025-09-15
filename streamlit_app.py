@@ -28,8 +28,12 @@ def load_keywords():
 
 @st.cache_data
 def fetch_rank_history(keyword_id: int, days=180):
+    # Note: using fetched_at AS date and position AS rank to match app expectations
     qry = text("""
-       SELECT date, rank FROM rank WHERE keyword_id = :kid ORDER BY date
+       SELECT fetched_at AS date, position AS rank 
+       FROM rank 
+       WHERE keyword_id = :kid 
+       ORDER BY fetched_at
     """)
     with engine.connect() as conn:
         df = pd.read_sql(qry, conn, params={"kid": keyword_id})
