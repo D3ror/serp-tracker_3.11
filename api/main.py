@@ -1,28 +1,35 @@
-from fastapi import FastAPI, Depends, Header, HTTPException, status
-import asyncio
-from api.config import settings
+# api/main.py
+from fastapi import FastAPI
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from api.models import Base
 from api.jobs import fetch_daily, compute_volatility, detect_anomalies
-from api.db import get_db
+from api.config import settings  # loads DATABASE_URL, etc.
 
-app = FastAPI(title="SERP Tracker")
+# --- Database setup ---
+# Use sync driver for table creation
+SYNC_DB_URL = settings.DATABASE_URL.replace("+asyncpg", "")
+engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def _check_token(token: str | None):
-    if settings.API_AUTH_TOKEN and token != settings.API_AUTH_TOKEN:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad token")
+# --- Create tables if they don't exist ---
+Base.metadata.create_all(bind=engine)
+
+# --- FastAPI app ---
+app = FastAPI()
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
 @app.post("/fetch-daily")
-async def run_fetch(x_api_token: str | None = Header(None)):
-    _check_token(x_api_token)
-    await fetch_daily()
-    return {"status":"ok"}
+def run_fetch():
+    fetch_daily()
+    return {"status": "ok"}
 
 @app.post("/compute")
-async def run_compute(x_api_token: str | None = Header(None)):
-    _check_token(x_api_token)
-    await compute_volatility()
-    await detect_anomalies()
-    return {"status":"ok"}
+def run_compute():
+    compute_volatility()
+    detect_anomalies()
+    return {"status": "ok"}
