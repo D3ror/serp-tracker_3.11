@@ -10,5 +10,5 @@ wheels/
 .venv
 
 
-# Environment Cariables
+# Environment variables
 .env
