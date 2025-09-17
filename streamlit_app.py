@@ -45,10 +45,10 @@ def fetch_rank_history(keyword_id: int, days=180):
 
 # --- UI ---
 st.set_page_config(page_title="SERP Tracker", layout="wide")
-st.title("🔍 SERP Tracker Dashboard")
+st.title("SERP Tracker Dashboard")
 
 # === Add new keyword ===
-st.subheader("➕ Add a new keyword")
+st.subheader("Add a new keyword")
 new_kw = st.text_input("Keyword")
 if st.button("Save keyword"):
     if new_kw.strip():
@@ -58,21 +58,21 @@ if st.button("Save keyword"):
                     text("INSERT INTO keyword (text) VALUES (:kw) ON CONFLICT DO NOTHING"),
                     {"kw": new_kw.strip()},
                 )
-            st.success(f"✅ Keyword '{new_kw}' added successfully!")
+            st.success(f"Keyword '{new_kw}' added successfully!")
             st.cache_data.clear()  # refresh cache so it appears immediately
         except Exception as e:
-            st.error(f"❌ Failed to add keyword: {e}")
+            st.error(f"Failed to add keyword: {e}")
     else:
-        st.warning("⚠️ Please enter a valid keyword.")
+        st.warning("Please enter a valid keyword.")
 
 st.markdown("---")
 
 # === Display and manage existing keywords ===
-st.subheader("🗂 Current Keywords")
+st.subheader("Current Keywords")
 keywords = load_keywords()
 
 if keywords.empty:
-    st.info("No keywords yet. Add one above ⬆️")
+    st.info("No keywords yet. Add one above")
     st.stop()
 
 for _, row in keywords.iterrows():
@@ -126,7 +126,7 @@ if sel:
             anomalies = z[abs(z) > 3.5]
 
             if not anomalies.empty:
-                st.markdown(f"🚨 **Anomalies detected**: {len(anomalies)}")
+                st.markdown(f"**Anomalies detected**: {len(anomalies)}")
                 st.write(anomalies.to_frame("zscore"))
 
                 # overlay anomalies on main chart
