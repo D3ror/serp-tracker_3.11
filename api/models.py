@@ -1,7 +1,9 @@
 # api/models.py
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, JSON, create_engine
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
+from api.config import settings
+import re
 
 Base = declarative_base()
 
@@ -11,9 +13,7 @@ class Keyword(Base):
     id = Column(Integer, primary_key=True, index=True)
     text = Column(String, unique=True, nullable=False)
 
-    ranks = relationship("Rank", back_populates="keyword", cascade="all, delete-orphan")
-    anomalies = relationship("Anomaly", back_populates="keyword", cascade="all, delete-orphan")
-    features = relationship("SerpFeature", back_populates="keyword", cascade="all, delete-orphan")
+    ranks = relationship("Rank", back_populates="keyword")
 
 
 class Engine(Base):
@@ -22,19 +22,18 @@ class Engine(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
 
-    ranks = relationship("Rank", back_populates="engine", cascade="all, delete-orphan")
+    ranks = relationship("Rank", back_populates="engine")
 
 
 class Rank(Base):
     __tablename__ = "rank"
 
     id = Column(Integer, primary_key=True, index=True)
-    keyword_id = Column(Integer, ForeignKey("keyword.id"), nullable=False)
-    engine_id = Column(Integer, ForeignKey("engine.id"), nullable=False)
-
-    domain = Column(String, nullable=False)                # which domain ranked
-    position = Column(Integer, nullable=False)             # SERP position (1 = top)
-    fetched_at = Column(DateTime, default=datetime.utcnow) # timestamp of fetch
+    keyword_id = Column(Integer, ForeignKey("keyword.id"))
+    engine_id = Column(Integer, ForeignKey("engine.id"))
+    position = Column(Integer, nullable=False)
+    domain = Column(String, nullable=True)  # ✅ new column
+    fetched_at = Column(DateTime, default=datetime.utcnow)
 
     keyword = relationship("Keyword", back_populates="ranks")
     engine = relationship("Engine", back_populates="ranks")
@@ -44,20 +43,29 @@ class SerpFeature(Base):
     __tablename__ = "serp_feature"
 
     id = Column(Integer, primary_key=True, index=True)
-    keyword_id = Column(Integer, ForeignKey("keyword.id"), nullable=False)
-    type = Column(String, nullable=False)  # e.g. "featured_snippet", "local_pack"
-    data = Column(JSON, nullable=True)     # flexible metadata blob
-
-    keyword = relationship("Keyword", back_populates="features")
+    keyword_id = Column(Integer, ForeignKey("keyword.id"))
+    type = Column(String, nullable=False)
+    data = Column(JSON)
 
 
 class Anomaly(Base):
     __tablename__ = "anomaly"
 
     id = Column(Integer, primary_key=True, index=True)
-    keyword_id = Column(Integer, ForeignKey("keyword.id"), nullable=False)
-    metric = Column(String, nullable=False)              # what was measured
-    score = Column(Float, nullable=False)                # z-score or volatility index
+    keyword_id = Column(Integer, ForeignKey("keyword.id"))
+    metric = Column(String, nullable=False)
+    score = Column(Float, nullable=False)
     detected_at = Column(DateTime, default=datetime.utcnow)
 
-    keyword = relationship("Keyword", back_populates="anomalies")
+
+# ✅ Helper: Reset DB schema (drop & recreate all tables)
+def reset_db():
+    # Convert async URL to sync for psycopg2
+    sync_url = re.sub(r"\+asyncpg", "", settings.DATABASE_URL)
+    engine = create_engine(sync_url, pool_pre_ping=True)
+
+    print("⚠️ Dropping all tables...")
+    Base.metadata.drop_all(engine)
+    print("✅ Creating fresh tables...")
+    Base.metadata.create_all(engine)
+    print("🎉 Database schema reset complete.")
