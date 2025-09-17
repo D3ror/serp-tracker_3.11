@@ -1,25 +1,47 @@
+import os
+import re
+import requests
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 from api.config import settings
-from api.models import Base
-from datetime import timedelta
+from datetime import datetime, timedelta
 import plotly.express as px
 from statsmodels.tsa.seasonal import STL
 import numpy as np
-import re
 
-# --- DB URL helper ---
+# Convert async URL to sync (postgresql+asyncpg:// -> postgresql://)
 def to_sync_url(async_url: str):
     return re.sub(r"\+asyncpg", "", async_url)
 
 SYNC_DB_URL = to_sync_url(settings.DATABASE_URL)
 engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
 
-# --- Create tables if missing ---
-Base.metadata.create_all(bind=engine)
+SERP_API_KEY = settings.SERP_API_KEY
 
-# --- Cached loaders ---
+# -------------------
+# Database Functions
+# -------------------
+def init_tables():
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS keyword (
+            id SERIAL PRIMARY KEY,
+            text TEXT UNIQUE NOT NULL
+        )
+        """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS rank (
+            id SERIAL PRIMARY KEY,
+            keyword_id INTEGER REFERENCES keyword(id),
+            domain TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            fetched_at TIMESTAMP DEFAULT now()
+        )
+        """))
+
+init_tables()
+
 @st.cache_data(ttl=600)
 def load_keywords():
     with engine.connect() as conn:
@@ -27,10 +49,9 @@ def load_keywords():
     return df
 
 @st.cache_data
-def fetch_rank_history(keyword_id: int, days=180):
-    # Note: using fetched_at AS date and position AS rank to match app expectations
+def fetch_rank_history(keyword_id: int):
     qry = text("""
-       SELECT fetched_at AS date, position AS rank 
+       SELECT fetched_at AS date, position, domain
        FROM rank 
        WHERE keyword_id = :kid 
        ORDER BY fetched_at
@@ -40,99 +61,133 @@ def fetch_rank_history(keyword_id: int, days=180):
     if df.empty:
         return df
     df['date'] = pd.to_datetime(df['date'])
-    df = df.set_index('date').asfreq('D').interpolate()
     return df
 
-# --- UI ---
-st.set_page_config(page_title="SERP Tracker", layout="wide")
-st.title("SERP Tracker Dashboard")
+def insert_keyword(kw: str):
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO keyword (text) VALUES (:kw) ON CONFLICT DO NOTHING"), {"kw": kw})
 
-# === Add new keyword ===
-st.subheader("Add a new keyword")
-new_kw = st.text_input("Keyword")
-if st.button("Save keyword"):
+def delete_keyword(kw_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM keyword WHERE id=:id"), {"id": kw_id})
+
+# -------------------
+# SerpAPI Fetch
+# -------------------
+def fetch_serp_results(keyword: str, keyword_id: int):
+    url = "https://serpapi.com/search"
+    params = {
+        "q": keyword,
+        "engine": "google",
+        "num": 100,   # request top 100 results
+        "api_key": SERP_API_KEY,
+    }
+    r = requests.get(url, params=params)
+    data = r.json()
+    if "organic_results" not in data:
+        return []
+
+    rows = []
+    for res in data["organic_results"]:
+        pos = res.get("position")
+        link = res.get("link", "")
+        domain = re.sub(r"^https?://(www\.)?", "", link).split("/")[0] if link else "unknown"
+        if pos:
+            rows.append({"keyword_id": keyword_id, "domain": domain, "position": pos, "fetched_at": datetime.utcnow()})
+    return rows
+
+def save_results(rows):
+    if not rows:
+        return
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(text("""
+                INSERT INTO rank (keyword_id, domain, position, fetched_at)
+                VALUES (:keyword_id, :domain, :position, :fetched_at)
+            """), r)
+
+# -------------------
+# UI
+# -------------------
+st.title("🔎 SERP Tracker Dashboard")
+
+# Keyword management
+st.subheader("Manage Keywords")
+new_kw = st.text_input("Add new keyword")
+if st.button("Add Keyword"):
     if new_kw.strip():
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("INSERT INTO keyword (text) VALUES (:kw) ON CONFLICT DO NOTHING"),
-                    {"kw": new_kw.strip()},
-                )
-            st.success(f"Keyword '{new_kw}' added successfully!")
-            st.cache_data.clear()  # refresh cache so it appears immediately
-        except Exception as e:
-            st.error(f"Failed to add keyword: {e}")
-    else:
-        st.warning("Please enter a valid keyword.")
-
-st.markdown("---")
-
-# === Display and manage existing keywords ===
-st.subheader("Current Keywords")
-keywords = load_keywords()
-
-if keywords.empty:
-    st.info("No keywords yet. Add one above")
-    st.stop()
-
-for _, row in keywords.iterrows():
-    col1, col2 = st.columns([3,1])
-    col1.write(row['text'])
-    if col2.button("Delete", key=f"del_{row['id']}"):
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM keyword WHERE id = :kid"),
-                {"kid": row['id']}
-            )
-        st.success(f"Deleted keyword '{row['text']}'")
+        insert_keyword(new_kw.strip())
+        st.success(f"Added keyword: {new_kw}")
         st.cache_data.clear()
 
-st.markdown("---")
+keywords = load_keywords()
+for _, row in keywords.iterrows():
+    col1, col2 = st.columns([4,1])
+    col1.write(row["text"])
+    if col2.button("❌", key=f"del{row['id']}"):
+        delete_keyword(row["id"])
+        st.cache_data.clear()
+        st.experimental_rerun()
 
-# === Keyword selection for rank chart ===
-sel = st.selectbox("Select keyword to view rank history", options=keywords['text'].tolist())
+# Fetch SERP now
+if st.button("Fetch SERP Data Now"):
+    for _, row in keywords.iterrows():
+        rows = fetch_serp_results(row["text"], row["id"])
+        save_results(rows)
+    st.success("SERP data fetched and saved.")
+    st.cache_data.clear()
 
-if sel:
-    kid = int(keywords[keywords['text'] == sel]['id'].iloc[0])
-    df = fetch_rank_history(kid, days=365)
+# Keyword selector
+if not keywords.empty:
+    sel = st.selectbox("Select a keyword", options=keywords["text"].tolist())
+    kid = int(keywords[keywords["text"] == sel]["id"].iloc[0])
+    df = fetch_rank_history(kid)
 
     if df.empty:
-        st.info("No rank history yet.")
+        st.info("No data yet. Fetch SERP data first.")
     else:
-        df['rank'] = df['rank'].astype(float)
-        fig = px.line(df, y='rank', title=f"Rank history — {sel}",
-                      labels={'index':'date','rank':'rank'})
-        fig.update_yaxes(autorange="reversed")  # rank 1 is top
-        st.plotly_chart(fig, use_container_width=True)
+        # View mode: per keyword or per domain
+        view_mode = st.radio("View", ["Keyword trend", "Domain trends"])
 
-        # --- STL decomposition + anomalies ---
-        if len(df) >= 14:
-            series = df['rank']
-            stl = STL(series, period=7, robust=True).fit()
-            comp = pd.DataFrame({
-                'trend': stl.trend,
-                'seasonal': stl.seasonal,
-                'resid': stl.resid
-            }, index=series.index)
+        if view_mode == "Keyword trend":
+            avg_rank = df.groupby("date")["position"].mean().reset_index()
+            fig = px.line(avg_rank, x="date", y="position", title=f"Rank trend — {sel}")
+            fig.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("📊 Decomposition")
-            st.line_chart(comp)
+            # anomaly detection
+            if len(avg_rank) >= 14:
+                series = avg_rank.set_index("date")["position"]
+                stl = STL(series, period=7, robust=True).fit()
+                resid = stl.resid
+                med, mad = resid.median(), (resid - resid.median()).abs().median()
+                denom = 1.4826 * mad if mad else resid.std()
+                z = (resid - med) / (denom or 1)
+                anomalies = z[abs(z) > 3.5]
+                if not anomalies.empty:
+                    st.markdown(f"**Anomalies detected:** {len(anomalies)}")
+                    st.write(anomalies)
 
-            # robust z-score on residuals
-            med = comp['resid'].median()
-            mad = (comp['resid'] - med).abs().median()
-            denom = 1.4826 * mad if mad != 0 else comp['resid'].std()
-            z = (comp['resid'] - med) / (denom or 1.0)
-            anomalies = z[abs(z) > 3.5]
+        elif view_mode == "Domain trends":
+            fig = px.line(df, x="date", y="position", color="domain", title=f"Domain trends — {sel}")
+            fig.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig, use_container_width=True)
 
-            if not anomalies.empty:
-                st.markdown(f"**Anomalies detected**: {len(anomalies)}")
-                st.write(anomalies.to_frame("zscore"))
-
-                # overlay anomalies on main chart
-                fig.add_scatter(x=anomalies.index,
-                                y=series.loc[anomalies.index],
-                                mode='markers',
-                                marker=dict(size=8, symbol='x'),
-                                name='anomaly')
-                st.plotly_chart(fig, use_container_width=True)
+# Volatility Index
+st.subheader("Volatility Index")
+qry = """
+SELECT fetched_at::date AS date, keyword_id, position
+FROM rank
+ORDER BY date
+"""
+with engine.connect() as conn:
+    vdf = pd.read_sql(qry, conn)
+if not vdf.empty:
+    vdf = vdf.groupby(["keyword_id", "date"])["position"].mean().reset_index()
+    vdf["change"] = vdf.groupby("keyword_id")["position"].diff().abs()
+    vol = vdf.groupby("date")["change"].mean().reset_index()
+    st.metric("Current Volatility", f"{vol['change'].iloc[-1]:.2f}")
+    fig = px.line(vol, x="date", y="change", title="Volatility Index over time")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("No volatility data yet. Fetch SERP data first.")
