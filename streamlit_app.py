@@ -17,6 +17,15 @@ def to_sync_url(async_url: str):
 SYNC_DB_URL = to_sync_url(settings.DATABASE_URL)
 engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
 
+# ✅ Check schema on startup
+inspector = inspect(engine)
+existing_tables = inspector.get_table_names()
+
+required_tables = {"keyword", "engine", "rank", "serp_feature", "anomaly"}
+if not required_tables.issubset(set(existing_tables)):
+    st.warning("⚠️ Database schema incomplete. Resetting...")
+    reset_db()
+
 SERP_API_KEY = settings.SERP_API_KEY
 
 # -------------------
