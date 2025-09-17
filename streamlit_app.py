@@ -3,7 +3,7 @@ import re
 import requests
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from api.config import settings
 from datetime import datetime, timedelta
 import plotly.express as px
