@@ -5,24 +5,25 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
 from api.config import settings
-from datetime import datetime, timedelta
+from api.models import reset_db   # ✅ reuse schema reset
+from datetime import datetime
 import plotly.express as px
 from statsmodels.tsa.seasonal import STL
 import numpy as np
 
-# Convert async URL to sync (postgresql+asyncpg:// -> postgresql://)
+# -------------------
+# Database Setup
+# -------------------
 def to_sync_url(async_url: str):
     return re.sub(r"\+asyncpg", "", async_url)
 
 SYNC_DB_URL = to_sync_url(settings.DATABASE_URL)
 engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
 
-# ✅ Check schema on startup
+# ✅ Ensure schema exists
 inspector = inspect(engine)
-existing_tables = inspector.get_table_names()
-
 required_tables = {"keyword", "engine", "rank", "serp_feature", "anomaly"}
-if not required_tables.issubset(set(existing_tables)):
+if not required_tables.issubset(set(inspector.get_table_names())):
     st.warning("⚠️ Database schema incomplete. Resetting...")
     reset_db()
 
@@ -31,26 +32,6 @@ SERP_API_KEY = settings.SERP_API_KEY
 # -------------------
 # Database Functions
 # -------------------
-def init_tables():
-    with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS keyword (
-            id SERIAL PRIMARY KEY,
-            text TEXT UNIQUE NOT NULL
-        )
-        """))
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS rank (
-            id SERIAL PRIMARY KEY,
-            keyword_id INTEGER REFERENCES keyword(id),
-            domain TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            fetched_at TIMESTAMP DEFAULT now()
-        )
-        """))
-
-init_tables()
-
 @st.cache_data(ttl=600)
 def load_keywords():
     with engine.connect() as conn:
@@ -74,7 +55,10 @@ def fetch_rank_history(keyword_id: int):
 
 def insert_keyword(kw: str):
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO keyword (text) VALUES (:kw) ON CONFLICT DO NOTHING"), {"kw": kw})
+        conn.execute(
+            text("INSERT INTO keyword (text) VALUES (:kw) ON CONFLICT DO NOTHING"),
+            {"kw": kw},
+        )
 
 def delete_keyword(kw_id: int):
     with engine.begin() as conn:
@@ -88,7 +72,7 @@ def fetch_serp_results(keyword: str, keyword_id: int):
     params = {
         "q": keyword,
         "engine": "google",
-        "num": 100,   # request top 100 results
+        "num": 100,
         "api_key": SERP_API_KEY,
     }
     r = requests.get(url, params=params)
@@ -102,7 +86,12 @@ def fetch_serp_results(keyword: str, keyword_id: int):
         link = res.get("link", "")
         domain = re.sub(r"^https?://(www\.)?", "", link).split("/")[0] if link else "unknown"
         if pos:
-            rows.append({"keyword_id": keyword_id, "domain": domain, "position": pos, "fetched_at": datetime.utcnow()})
+            rows.append({
+                "keyword_id": keyword_id,
+                "domain": domain,
+                "position": pos,
+                "fetched_at": datetime.utcnow(),
+            })
     return rows
 
 def save_results(rows):
@@ -120,7 +109,7 @@ def save_results(rows):
 # -------------------
 st.title("🔎 SERP Tracker Dashboard")
 
-# Keyword management
+# --- Keyword management ---
 st.subheader("Manage Keywords")
 new_kw = st.text_input("Add new keyword")
 if st.button("Add Keyword"):
@@ -138,7 +127,7 @@ for _, row in keywords.iterrows():
         st.cache_data.clear()
         st.experimental_rerun()
 
-# Fetch SERP now
+# --- Fetch SERP ---
 if st.button("Fetch SERP Data Now"):
     for _, row in keywords.iterrows():
         rows = fetch_serp_results(row["text"], row["id"])
@@ -146,7 +135,7 @@ if st.button("Fetch SERP Data Now"):
     st.success("SERP data fetched and saved.")
     st.cache_data.clear()
 
-# Keyword selector
+# --- Keyword selector ---
 if not keywords.empty:
     sel = st.selectbox("Select a keyword", options=keywords["text"].tolist())
     kid = int(keywords[keywords["text"] == sel]["id"].iloc[0])
@@ -155,7 +144,6 @@ if not keywords.empty:
     if df.empty:
         st.info("No data yet. Fetch SERP data first.")
     else:
-        # View mode: per keyword or per domain
         view_mode = st.radio("View", ["Keyword trend", "Domain trends"])
 
         if view_mode == "Keyword trend":
@@ -182,7 +170,7 @@ if not keywords.empty:
             fig.update_yaxes(autorange="reversed")
             st.plotly_chart(fig, use_container_width=True)
 
-# Volatility Index
+# --- Volatility Index ---
 st.subheader("Volatility Index")
 qry = """
 SELECT fetched_at::date AS date, keyword_id, position

@@ -1,4 +1,3 @@
-# api/models.py
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, JSON, create_engine
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
@@ -32,7 +31,7 @@ class Rank(Base):
     keyword_id = Column(Integer, ForeignKey("keyword.id"))
     engine_id = Column(Integer, ForeignKey("engine.id"))
     position = Column(Integer, nullable=False)
-    domain = Column(String, nullable=True)  # ✅ new column
+    domain = Column(String, nullable=False)  # ✅ required, consistent with app inserts
     fetched_at = Column(DateTime, default=datetime.utcnow)
 
     keyword = relationship("Keyword", back_populates="ranks")
@@ -60,7 +59,6 @@ class Anomaly(Base):
 
 # ✅ Helper: Reset DB schema (drop & recreate all tables)
 def reset_db():
-    # Convert async URL to sync for psycopg2
     sync_url = re.sub(r"\+asyncpg", "", settings.DATABASE_URL)
     engine = create_engine(sync_url, pool_pre_ping=True)
 
