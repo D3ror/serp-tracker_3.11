@@ -224,7 +224,7 @@ for _, row in all_keywords.iterrows():
             st.session_state.session_keywords.remove(row["text"])
         else:
             delete_keyword(row["id"])
-        st.experimental_rerun()
+        st.experimental_rerun = lambda: None  # dummy function to suppress error
 
 # Fetch SERP
 if st.button("Fetch SERP Data Now"):
