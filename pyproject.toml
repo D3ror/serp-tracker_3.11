@@ -17,6 +17,7 @@ dependencies = [
     "psycopg2-binary>=2.9.10",
     "pydantic-settings>=2.10.1",
     "python-dateutil>=2.9.0.post0",
+    "pytrends>=4.9.2",
     "scikit-learn>=1.7.2",
     "slack-sdk>=3.36.0",
     "sqlalchemy>=2.0.43",
