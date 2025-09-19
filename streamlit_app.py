@@ -195,15 +195,16 @@ else:
 # ----------------------
 # UI
 # ----------------------
-st.title("🔎 SERP Tracker Dashboard")
+st.title("SERP tracker dashboard")
 
+st.text("This web application is collecting search results from English websites (.en). Keep this in mind when looking at the session data.")
 # Keyword management
-st.subheader("Manage Keywords")
+st.subheader("Manage keywords")
 if "session_keywords" not in st.session_state:
     st.session_state.session_keywords = []
 
-new_kw = st.text_input("Add new keyword (session only)")
-if st.button("Add Keyword"):
+new_kw = st.text_input("Add new keyword")
+if st.button("Add keyword"):
     if new_kw.strip():
         st.session_state.session_keywords.append(new_kw.strip())
         st.success(f"Added keyword: {new_kw}")
@@ -227,7 +228,7 @@ for _, row in all_keywords.iterrows():
         st.experimental_rerun = lambda: None  # dummy function to suppress error
 
 # Fetch SERP
-if st.button("Fetch SERP Data Now"):
+if st.button("Fetch SERP data"):
     for _, row in all_keywords.iterrows():
         rows = fetch_serp_results(row["text"], row["id"], save_to_db=save_to_db)
         if not save_to_db:
@@ -284,11 +285,11 @@ if not all_keywords.empty:
             st.plotly_chart(fig, use_container_width=True)
 
 # Volatility Index
-st.subheader("Volatility Index (Google Trends)")
+st.subheader("Search volume volatility (Google Trends)")
 kws = all_keywords["text"].tolist()
 voldf = get_volatility_from_trends(kws, timeframe="now 7-d")
 if not voldf.empty:
-    st.metric("Current Volatility (Trends)", f"{voldf['volatility'].iloc[-1]:.3f}")
+    st.metric("Current volatility (Trends)", f"{voldf['volatility'].iloc[-1]:.3f}")
     st.plotly_chart(px.line(voldf, x="date", y="volatility", title="Volatility (Google Trends)"))
 else:
-    st.info("No volatility data available (Google Trends may be rate-limited).")
+    st.info("No volatility data available.")
