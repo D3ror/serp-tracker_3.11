@@ -9,7 +9,6 @@ from api.config import settings
 from datetime import datetime
 import plotly.express as px
 from statsmodels.tsa.seasonal import STL
-import numpy as np
 from pytrends.request import TrendReq
 
 # ----------------------
@@ -92,7 +91,7 @@ def fetch_rank_history(keyword_id: int):
         df = pd.read_sql(qry, conn, params={"kid": keyword_id})
     if df.empty:
         return df
-    df['date'] = pd.to_datetime(df['date'])
+    df["date"] = pd.to_datetime(df["date"])
     return df
 
 # ----------------------
@@ -103,7 +102,7 @@ def fetch_serp_results(keyword: str, keyword_id: int, save_to_db=False):
     params = {
         "q": keyword,
         "engine": "google",
-        "num": 100,
+        "num": 100,  # ⚠️ note: SerpAPI may ignore this, but harmless
         "api_key": SERP_API_KEY,
     }
     try:
@@ -138,7 +137,7 @@ def fetch_serp_results(keyword: str, keyword_id: int, save_to_db=False):
 # ----------------------
 # Google Trends volatility
 # ----------------------
-def get_volatility_from_trends(keywords, timeframe="today 7-d"):
+def get_volatility_from_trends(keywords, timeframe="now 7-d"):
     if not keywords:
         return pd.DataFrame()
 
@@ -166,7 +165,7 @@ def get_volatility_from_trends(keywords, timeframe="today 7-d"):
 
     combined = pd.concat(all_series, axis=1)
     combined["volatility"] = combined.mean(axis=1)
-    return combined[["volatility"]].reset_index().rename(columns={"index": "date"})
+    return combined.reset_index().rename(columns={"date": "date"})
 
 # ----------------------
 # Admin login
@@ -246,6 +245,9 @@ if not all_keywords.empty:
     if df.empty:
         st.info("No data yet. Fetch SERP data first.")
     else:
+        if "date" not in df.columns and "fetched_at" in df.columns:
+            df["date"] = pd.to_datetime(df["fetched_at"])
+
         view_mode = st.radio("View", ["Keyword trend", "Domain trends"])
 
         if view_mode == "Keyword trend":
@@ -256,6 +258,7 @@ if not all_keywords.empty:
 
             # anomaly detection
             if len(avg_rank) >= 14:
+                from numpy import median
                 series = avg_rank.set_index("date")["position"]
                 stl = STL(series, period=7, robust=True).fit()
                 resid = stl.resid
@@ -268,20 +271,20 @@ if not all_keywords.empty:
                     st.write(anomalies)
 
         elif view_mode == "Domain trends":
-            df_snap = df.sort_values("position").head(9)
+            df_snap = df.sort_values("position", ascending=True).head(9)
             fig = px.bar(
-                df_snap,
+                df_snap.sort_values("position", ascending=True),
                 x="position", y="domain",
                 orientation="h", text="position",
                 title=f"Top 9 domains for '{sel_kw}'"
             )
-            fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": df_snap["domain"].tolist()})
+            fig.update_yaxes(autorange="reversed")  # ✅ ensures #1 at top
             st.plotly_chart(fig, use_container_width=True)
 
 # Volatility Index
 st.subheader("Volatility Index (Google Trends)")
 kws = all_keywords["text"].tolist()
-voldf = get_volatility_from_trends(kws, timeframe="today 7-d")
+voldf = get_volatility_from_trends(kws, timeframe="now 7-d")
 if not voldf.empty:
     st.metric("Current Volatility (Trends)", f"{voldf['volatility'].iloc[-1]:.3f}")
     st.plotly_chart(px.line(voldf, x="date", y="volatility", title="Volatility (Google Trends)"))
