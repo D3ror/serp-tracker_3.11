@@ -197,7 +197,7 @@ else:
 # ----------------------
 st.title("SERP tracker dashboard")
 
-st.text("This web application is collecting search results from English websites (.en). Keep this in mind when looking at the session data.")
+st.text("This web application is collecting search results from international websites (.com). Keep this in mind when looking at the session data.")
 # Keyword management
 st.subheader("Manage keywords")
 if "session_keywords" not in st.session_state:
