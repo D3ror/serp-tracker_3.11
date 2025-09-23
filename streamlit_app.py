@@ -1,5 +1,7 @@
+# ui/streamlit_app.py
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
 import os
 import re
 import time
@@ -12,6 +14,25 @@ from datetime import datetime
 import plotly.express as px
 from statsmodels.tsa.seasonal import STL
 from pytrends.request import TrendReq
+import numpy as np
+
+# ----------------------
+# Safe rerun helper (works across Streamlit versions)
+# ----------------------
+def safe_rerun():
+    """
+    Try to rerun the script. If st.experimental_rerun is missing or fails,
+    toggle a session key and stop the script so the UI refreshes cleanly.
+    """
+    if hasattr(st, "experimental_rerun"):
+        try:
+            st.experimental_rerun()
+            return
+        except Exception:
+            pass
+    # fallback: toggle a key and stop execution (forces front-end refresh)
+    st.session_state["_rerun"] = not st.session_state.get("_rerun", False)
+    st.stop()
 
 # ----------------------
 # Database setup
@@ -22,7 +43,7 @@ def to_sync_url(async_url: str):
 SYNC_DB_URL = to_sync_url(settings.DATABASE_URL)
 engine = create_engine(SYNC_DB_URL, pool_pre_ping=True)
 
-# ✅ check schema
+# ensure schema present (models.reset_db will drop & recreate)
 from api.models import reset_db
 inspector = inspect(engine)
 existing_tables = inspector.get_table_names()
@@ -97,47 +118,60 @@ def fetch_rank_history(keyword_id: int):
     return df
 
 # ----------------------
-# SERP fetch
+# SERP fetch (session-first)
 # ----------------------
 def fetch_serp_results(keyword: str, keyword_id: int, save_to_db=False):
+    """
+    Fetch SERP from SerpAPI. Returns list of dicts (not persisted unless save_to_db=True).
+    """
+    if not SERP_API_KEY:
+        st.error("SERP_API_KEY not configured. Set it in Streamlit Secrets for live SERP.")
+        return []
     url = "https://serpapi.com/search"
     params = {
         "q": keyword,
         "engine": "google",
-        "num": 100,  # ⚠️ note: SerpAPI may ignore this, but harmless
+        "num": 100,
         "api_key": SERP_API_KEY,
     }
     try:
         r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
     except requests.RequestException as e:
-        st.error(f"SERP API error: {e}")
+        st.error(f"SERP API error for '{keyword}': {e}")
         return []
 
-    data = r.json()
-    if "organic_results" not in data:
+    try:
+        data = r.json()
+    except Exception:
+        st.error("SerpAPI returned unexpected response.")
         return []
 
+    organic = data.get("organic_results") or []
     rows = []
-    for res in data["organic_results"]:
+    for res in organic:
         pos = res.get("position")
-        link = res.get("link", "")
+        link = res.get("link", "") or res.get("url", "")
         domain = re.sub(r"^https?://(www\.)?", "", link).split("/")[0] if link else "unknown"
-        if pos:
-            rows.append({
-                "keyword_id": keyword_id,
-                "domain": domain,
-                "position": pos,
-                "fetched_at": datetime.utcnow(),
-            })
+        if pos is None:
+            continue
+        rows.append({
+            "keyword_id": keyword_id,
+            "domain": domain,
+            "position": int(pos),
+            "fetched_at": datetime.utcnow(),
+        })
 
-    if save_to_db:
-        save_results(rows)
+    if save_to_db and rows:
+        try:
+            save_results(rows)
+        except Exception as e:
+            st.error(f"Failed to save SERP rows to DB: {e}")
 
     return rows
 
 # ----------------------
-# Google Trends volatility
+# Google Trends volatility (aggregate pct-change)
 # ----------------------
 def get_volatility_from_trends(keywords, timeframe="now 7-d"):
     if not keywords:
@@ -145,32 +179,44 @@ def get_volatility_from_trends(keywords, timeframe="now 7-d"):
 
     py = st.session_state.get("pytrends")
     if not py:
-        py = TrendReq(hl="en-US", tz=360)
-        st.session_state.pytrends = py
+        try:
+            py = TrendReq(hl="en-US", tz=360)
+            st.session_state.pytrends = py
+        except Exception as e:
+            st.warning(f"Failed to initialize Google Trends client: {e}")
+            return pd.DataFrame()
 
     all_series = []
     for kw in keywords:
+        if not kw or pd.isna(kw):
+            continue
         try:
             py.build_payload([kw], cat=0, timeframe=timeframe, geo="")
             df = py.interest_over_time()
             if df.empty:
                 continue
+            # interest_over_time returns timestamp index; compute abs pct change
             s = df[kw].pct_change().abs().rename(kw)
+            s.index = pd.to_datetime(s.index)
             all_series.append(s)
-            time.sleep(0.5)  # avoid rate limits
+            time.sleep(0.5)
         except Exception as e:
-            st.warning(f"Trend fetch failed for {kw}: {e}")
+            # non-fatal: continue with others, but warn
+            st.warning(f"Google Trends failed for '{kw}': {e}")
             continue
 
     if not all_series:
         return pd.DataFrame()
 
-    combined = pd.concat(all_series, axis=1)
+    combined = pd.concat(all_series, axis=1).fillna(method="ffill").fillna(0)
     combined["volatility"] = combined.mean(axis=1)
-    return combined.reset_index().rename(columns={"date": "date"})
+    out = combined[["volatility"]].reset_index().rename(columns={"index": "date"})
+    # clean and sort
+    out = out.dropna(subset=["volatility"]).sort_values("date")
+    return out
 
 # ----------------------
-# Admin login
+# Admin login (hidden options)
 # ----------------------
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
@@ -178,11 +224,13 @@ if "is_admin" not in st.session_state:
 if not st.session_state.is_admin:
     with st.sidebar:
         pw = st.text_input("Admin password", type="password")
-        if pw and pw == st.secrets.get("ADMIN_PASSWORD", ""):
-            st.session_state.is_admin = True
-            st.success("Admin mode enabled")
-        elif pw:
-            st.error("Wrong password")
+        if pw:
+            if pw == st.secrets.get("ADMIN_PASSWORD", ""):
+                st.session_state.is_admin = True
+                st.success("Admin mode enabled")
+                safe_rerun()
+            else:
+                st.error("Wrong password")
 
 if st.session_state.is_admin:
     st.sidebar.header("Admin / Options")
@@ -193,103 +241,178 @@ else:
     show_db_keywords = False
 
 # ----------------------
-# UI
+# UI: header & notes
 # ----------------------
 st.title("SERP tracker dashboard")
+st.text("This web application collects SERP snapshots (public web results). Each visitor uses a session-first experience by default.")
 
-st.text("This web application is collecting search results from international websites (.com). Keep this in mind when looking at the session data.")
-# Keyword management
+# ----------------------
+# Keyword management (session-only by default)
+# ----------------------
 st.subheader("Manage keywords")
 if "session_keywords" not in st.session_state:
     st.session_state.session_keywords = []
 
-new_kw = st.text_input("Add new keyword")
+new_kw = st.text_input("Add new keyword (session only)")
 if st.button("Add keyword"):
-    if new_kw.strip():
+    if new_kw and new_kw.strip():
         st.session_state.session_keywords.append(new_kw.strip())
-        st.success(f"Added keyword: {new_kw}")
+        st.success(f"Added keyword: {new_kw.strip()}")
+        safe_rerun()
 
 # show persisted DB keywords only if admin enabled it
-keywords = load_keywords() if show_db_keywords else pd.DataFrame(columns=["id", "text"])
-session_kws = pd.DataFrame(
-    [{"id": -(i+1), "text": kw} for i, kw in enumerate(st.session_state.session_keywords)]
-)
+keywords_df = load_keywords() if show_db_keywords else pd.DataFrame(columns=["id", "text"])
+session_kws = pd.DataFrame([{"id": -(i+1), "text": kw} for i, kw in enumerate(st.session_state.session_keywords)])
+all_keywords = pd.concat([session_kws, keywords_df], ignore_index=True, sort=False)
 
-all_keywords = pd.concat([session_kws, keywords], ignore_index=True)
-
+# render keywords and deletion buttons
 for _, row in all_keywords.iterrows():
-    col1, col2 = st.columns([4,1])
+    col1, col2 = st.columns([4, 1])
     col1.write(row["text"])
     if col2.button("❌", key=f"del{row['id']}"):
-        if row["id"] < 0:  # session keyword
-            st.session_state.session_keywords.remove(row["text"])
+        if int(row["id"]) < 0:
+            # session keyword
+            try:
+                st.session_state.session_keywords.remove(row["text"])
+            except ValueError:
+                pass
         else:
-            delete_keyword(row["id"])
-        st.experimental_rerun = lambda: None  # dummy function to suppress error
+            # persisted
+            delete_keyword(int(row["id"]))
+        safe_rerun()
 
-# Fetch SERP
+# ----------------------
+# Fetch SERP (session-first)
+# ----------------------
 if st.button("Fetch SERP data"):
-    for _, row in all_keywords.iterrows():
-        rows = fetch_serp_results(row["text"], row["id"], save_to_db=save_to_db)
-        if not save_to_db:
-            st.session_state[f"serp_{row['text']}"] = pd.DataFrame(rows)
-    st.success("SERP data fetched.")
+    if all_keywords.empty:
+        st.info("No keywords available to fetch. Add one.")
+    else:
+        for _, row in all_keywords.iterrows():
+            kw_text = row["text"]
+            kw_id = int(row["id"])
+            rows = fetch_serp_results(kw_text, kw_id, save_to_db=save_to_db)
+            if not save_to_db:
+                # store session DataFrame for UI access
+                st.session_state[f"serp_{kw_text}"] = pd.DataFrame(rows)
+        st.success("SERP data fetched.")
+        safe_rerun()
 
-# Keyword selector
+# ----------------------
+# Keyword selector & Views
+# ----------------------
 if not all_keywords.empty:
     sel_kw = st.selectbox("Select a keyword", options=all_keywords["text"].tolist())
     kid = int(all_keywords[all_keywords["text"] == sel_kw]["id"].iloc[0])
 
-    if kid < 0:  # session keyword
+    # load dataframe: session snapshot or DB history
+    if kid < 0:
         df = st.session_state.get(f"serp_{sel_kw}", pd.DataFrame())
-    else:  # persisted
+        # if stored as list of dicts, convert
+        if isinstance(df, list):
+            df = pd.DataFrame(df)
+    else:
         df = fetch_rank_history(kid)
 
     if df.empty:
         st.info("No data yet. Fetch SERP data first.")
     else:
+        # ensure date column present
         if "date" not in df.columns and "fetched_at" in df.columns:
             df["date"] = pd.to_datetime(df["fetched_at"])
 
         view_mode = st.radio("View", ["Keyword trend", "Domain trends"])
 
+        # ----------------------
+        # KEYWORD TREND: domain vs position snapshot + per-domain anomaly detection
+        # ----------------------
         if view_mode == "Keyword trend":
-            avg_rank = df.groupby("date")["position"].mean().reset_index()
-            fig = px.line(avg_rank, x="date", y="position", title=f"Rank trend — {sel_kw}")
-            fig.update_yaxes(autorange="reversed")
+            # Snapshot: last known position per domain
+            try:
+                last_by_domain = (df.sort_values("date")
+                                    .groupby("domain", as_index=False)
+                                    .last()[["domain", "position", "date"]]
+                                    .sort_values("position", ascending=True))
+            except Exception:
+                last_by_domain = df.sort_values("position").drop_duplicates(subset=["domain"])[["domain", "position", "date"]]
+
+            fig = px.bar(
+                last_by_domain,
+                x="position", y="domain",
+                orientation="h", text="position",
+                title=f"Keyword trend — {sel_kw}"
+            )
+            # ensure 1 appears at top visually
+            fig.update_yaxes(categoryorder="array", categoryarray=last_by_domain["domain"].tolist()[::-1])
+            fig.update_xaxes(autorange="reversed")
             st.plotly_chart(fig, use_container_width=True)
 
-            # anomaly detection
-            if len(avg_rank) >= 14:
-                from numpy import median
-                series = avg_rank.set_index("date")["position"]
-                stl = STL(series, period=7, robust=True).fit()
-                resid = stl.resid
-                med, mad = resid.median(), (resid - resid.median()).abs().median()
-                denom = 1.4826 * mad if mad else resid.std()
-                z = (resid - med) / (denom or 1)
-                anomalies = z[abs(z) > 3.5]
-                if not anomalies.empty:
-                    st.markdown(f"**Anomalies detected:** {len(anomalies)}")
-                    st.write(anomalies)
+            # Per-domain anomaly detection (STL) when we have enough history for that domain
+            st.subheader("Per-domain anomaly detection")
+            anomalies_summary = []
+            domains = df["domain"].unique().tolist()
+            for dom in domains:
+                dom_df = df[df["domain"] == dom].sort_values("date")
+                if len(dom_df) < 14:
+                    # not enough points for STL — skip but compute simple changes if desired
+                    continue
+                # build a daily series (fill missing days by forward fill)
+                ser = dom_df.set_index("date").resample("D")["position"].mean().interpolate()
+                try:
+                    stl = STL(ser, period=7, robust=True).fit()
+                    resid = stl.resid
+                    med = resid.median()
+                    mad = (resid - med).abs().median()
+                    denom = 1.4826 * mad if mad != 0 else resid.std()
+                    z = (resid - med) / (denom or 1.0)
+                    anoms = z[abs(z) > 3.5]
+                    if not anoms.empty:
+                        for idx, val in anoms.items():
+                            anomalies_summary.append({"domain": dom, "date": idx.date(), "zscore": float(val)})
+                except Exception as e:
+                    # If STL fails for this domain, skip and continue quietly
+                    continue
 
+            if anomalies_summary:
+                ast = pd.DataFrame(anomalies_summary).sort_values(["date", "zscore"], ascending=[False, False])
+                st.write("Anomalies detected (domain, date, z-score):")
+                st.table(ast)
+            else:
+                st.info("No domain-level anomalies detected (not enough history or no spikes).")
+
+        # ----------------------
+        # DOMAIN TRENDS: top 9 placement distribution (snapshot)
+        # ----------------------
         elif view_mode == "Domain trends":
             df_snap = df.sort_values("position", ascending=True).head(9)
+            # ensure we have 'position' ints and domain strings
+            df_snap = df_snap.assign(position=df_snap["position"].astype(int))
             fig = px.bar(
                 df_snap.sort_values("position", ascending=True),
                 x="position", y="domain",
                 orientation="h", text="position",
-                title=f"Top 9 domains for '{sel_kw}'"
+                title="Top 9 placement distribution"
             )
-            fig.update_yaxes(autorange="reversed")  # ✅ ensures #1 at top
+            # show #1 at top
+            fig.update_yaxes(categoryorder="array", categoryarray=df_snap["domain"].tolist()[::-1])
+            fig.update_xaxes(autorange="reversed")
             st.plotly_chart(fig, use_container_width=True)
 
-# Volatility Index
+# ----------------------
+# Volatility Index (Google Trends)
+# ----------------------
 st.subheader("Search volume volatility (Google Trends)")
 kws = all_keywords["text"].tolist()
-voldf = get_volatility_from_trends(kws, timeframe="now 7-d")
+try:
+    voldf = get_volatility_from_trends(kws, timeframe="now 7-d")
+except NameError:
+    # compatibility: if function named differently, try the alternative name
+    voldf = pd.DataFrame()
+
 if not voldf.empty:
+    # drop NaNs and sort
+    voldf = voldf.dropna(subset=["volatility"]).sort_values("date")
     st.metric("Current volatility (Trends)", f"{voldf['volatility'].iloc[-1]:.3f}")
-    st.plotly_chart(px.line(voldf, x="date", y="volatility", title="Volatility (Google Trends)"))
+    st.plotly_chart(px.line(voldf, x="date", y="volatility", title="Volatility (Google Trends)"), use_container_width=True)
 else:
-    st.info("No volatility data available.")
+    st.info("No volatility data available (Google Trends may be rate-limited or returned no results).")
