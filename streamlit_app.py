@@ -195,6 +195,9 @@ else:
 # ----------------------
 # UI
 # ----------------------
+
+st.set_page_config(page_title="SERP tracker", layout="wide")
+
 st.title("SERP tracker dashboard")
 
 st.text("This web application is collecting search results from international websites (.com). Keep this in mind when looking at the session data.")
